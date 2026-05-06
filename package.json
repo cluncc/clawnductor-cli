@@ -1,0 +1,30 @@
+{
+  "name": "clawnductor-cli",
+  "version": "1.0.0",
+  "description": "Cross-platform CLI for clawnductor — persistent Claude Code sessions, multi-agent ensembles, ultraplan, and fleet review. Zero external dependencies.",
+  "type": "module",
+  "bin": {
+    "clawnductor": "./dist/src/cli.js"
+  },
+  "main": "./dist/src/cli.js",
+  "files": [
+    "dist/",
+    "configs/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/cli.js",
+    "prepublishOnly": "npm run build",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/validation.test.js dist-test/args.test.js dist-test/state.test.js dist-test/ensemble.test.js dist-test/session.test.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": ["claude", "claude-code", "ai", "cli", "multi-agent", "ensemble"],
+  "license": "UNLICENSED"
+}

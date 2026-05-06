@@ -1,0 +1,632 @@
+/**
+ * Ensemble — multi-agent ensemble with git worktree isolation
+ *
+ * Round 1: all agents write plan.md in parallel (no code allowed)
+ * Round 2+: agents claim tasks, implement, merge to main, cross-review
+ * Done when all agents vote [CONSENSUS: YES] or max rounds reached
+ *
+ * Cross-platform: works on Linux, macOS, and Windows.
+ */
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { PersistentClaudeSession } from './session.js';
+import { validateAgentName } from './validation.js';
+import { stateDir } from './state.js';
+import {
+  type AgentPersona,
+  type EnsembleConfig,
+  type EnsembleSession,
+  type AgentResponse,
+  type EnsembleReviewResult,
+  type EnsembleAcceptResult,
+  type EnsembleRejectResult,
+  type EnsembleChangedFile,
+  INTER_ROUND_DELAY_MS,
+  GIT_CMD_TIMEOUT_MS,
+  WORKTREE_DIR,
+  DEFAULT_AGENT_TIMEOUT_MS,
+  DEFAULT_MAX_ROUNDS,
+  DEFAULT_MAX_TURNS_PER_AGENT,
+} from './types.js';
+
+// ─── Consensus ────────────────────────────────────────────────────────────────
+
+export function parseConsensus(text: string): boolean | null {
+  const m = text.match(/\[CONSENSUS:\s*(YES|NO)\]/i);
+  if (!m) return null;
+  return m[1].toUpperCase() === 'YES';
+}
+
+// ─── Git helpers ──────────────────────────────────────────────────────────────
+
+function git(
+  args: string[],
+  cwd: string,
+  timeoutMs = GIT_CMD_TIMEOUT_MS,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, stdio: 'pipe' });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`git ${args[0]} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(`git ${args.join(' ')} failed: ${err.trim()}`));
+      else resolve({ stdout: out, stderr: err });
+    });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+
+// ─── Safe string substitution (avoids $& / $1 interpretation) ────────────────
+
+function literalReplace(template: string, token: string, value: string): string {
+  return template.split(token).join(value);
+}
+
+// ─── System prompt loader ─────────────────────────────────────────────────────
+
+function loadSystemPrompt(): string {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  // dist/src/ensemble.js → ../../configs/council-system-prompt.md
+  const promptPath = path.join(dir, '..', '..', 'configs', 'council-system-prompt.md');
+  try {
+    return fs.readFileSync(promptPath, 'utf8');
+  } catch {
+    return DEFAULT_SYSTEM_PROMPT;
+  }
+}
+
+// ─── Ensemble ─────────────────────────────────────────────────────────────────
+
+export class Ensemble extends EventEmitter {
+  readonly session: EnsembleSession;
+  private _agentSessions: Map<string, PersistentClaudeSession> = new Map();
+  private _aborted = false;
+  private claudeBin: string;
+  private _injected: string[] = [];
+  private log: (msg: string) => void;
+
+  constructor(
+    session: EnsembleSession,
+    claudeBin: string,
+    log?: (msg: string) => void,
+  ) {
+    super();
+    this.session = session;
+    this.claudeBin = claudeBin;
+    this.log = log ?? (() => {});
+  }
+
+  get id(): string { return this.session.id; }
+
+  abort(): void {
+    this._aborted = true;
+    for (const s of this._agentSessions.values()) s.stop();
+    this._agentSessions.clear();
+    this.log(`[ensemble:${this.id}] aborted`);
+  }
+
+  inject(message: string): void {
+    this._injected.push(message);
+  }
+
+  // ─── Run ───────────────────────────────────────────────────────────────────
+
+  async run(): Promise<void> {
+    const { config, task } = this.session;
+    const projectDir = path.resolve(config.projectDir);
+    const maxRounds = config.maxRounds ?? DEFAULT_MAX_ROUNDS;
+
+    this.log(`[ensemble:${this.id}] starting — task: ${task.slice(0, 80)}`);
+    this._flushLog();
+    this.session.status = 'running';
+
+    try {
+      // Ensure the project dir is a git repo with at least one commit
+      try {
+        await git(['rev-parse', '--git-dir'], projectDir);
+        try {
+          await git(['rev-parse', 'HEAD'], projectDir);
+        } catch {
+          await git(
+            ['-c', 'user.email=ensemble@local', '-c', 'user.name=Ensemble',
+              'commit', '--allow-empty', '-m', 'init: ensemble workspace'],
+            projectDir,
+          );
+        }
+      } catch {
+        await git(['init'], projectDir);
+        await git(
+          ['-c', 'user.email=ensemble@local', '-c', 'user.name=Ensemble',
+            'commit', '--allow-empty', '-m', 'init: ensemble workspace'],
+          projectDir,
+        );
+      }
+
+      await this._setupWorktrees(projectDir, config.agents);
+
+      for (let round = 1; round <= maxRounds; round++) {
+        if (this._aborted) break;
+
+        this.session.round = round;
+        this.log(`[ensemble:${this.id}] round ${round}/${maxRounds} starting`);
+
+        const injected = this._injected.splice(0);
+        const planContent = this._readPlan(projectDir);
+        const gitLog = await this._getGitLog(projectDir);
+
+        const responses = await this._runRound(
+          round, task, config, projectDir, planContent, gitLog, injected,
+        );
+
+        const allYes =
+          config.agents.length > 0 &&
+          responses.length === config.agents.length &&
+          responses.every((r) => r.consensus);
+
+        const voteStr = responses
+          .map((r) => `${r.agent}:${r.consensus ? 'YES' : 'NO'}`)
+          .join(' ');
+        this.log(`[ensemble:${this.id}] round ${round} votes — ${voteStr}`);
+        this._flushLog();
+
+        if (allYes) {
+          this.session.status = 'consensus';
+          this.session.endTime = new Date().toISOString();
+          this.log(`[ensemble:${this.id}] consensus reached after ${round} round(s)`);
+          break;
+        }
+
+        if (round < maxRounds) {
+          await new Promise((r) => setTimeout(r, INTER_ROUND_DELAY_MS));
+        }
+      }
+
+      if (this.session.status === 'running') {
+        this.session.status = 'max_rounds';
+        this.session.endTime = new Date().toISOString();
+        this.log(`[ensemble:${this.id}] max rounds (${maxRounds}) reached without consensus`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.session.status = 'error';
+      this.session.error = msg;
+      this.session.endTime = new Date().toISOString();
+      this.log(`[ensemble:${this.id}] error — ${msg}`);
+    } finally {
+      for (const s of this._agentSessions.values()) s.stop();
+      this._agentSessions.clear();
+      this._flushLog();
+    }
+  }
+
+  // ─── Round execution ───────────────────────────────────────────────────────
+
+  private async _runRound(
+    round: number,
+    task: string,
+    config: EnsembleConfig,
+    projectDir: string,
+    planContent: string | null,
+    gitLog: string,
+    injected: string[],
+  ): Promise<AgentResponse[]> {
+    const agentTimeoutMs = config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
+    const maxTurns = config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS_PER_AGENT;
+
+    return Promise.all(
+      config.agents.map(async (agent) => {
+        let response: AgentResponse;
+        try {
+          response = await this._runAgent(
+            agent, round, task, config, projectDir,
+            planContent, gitLog, injected, agentTimeoutMs, maxTurns,
+          );
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.log(`[ensemble:${this.id}] agent ${agent.name} round ${round} failed — ${errMsg}`);
+          response = {
+            agent: agent.name,
+            round,
+            content: `[ERROR] ${errMsg}`,
+            consensus: false,
+            timestamp: new Date().toISOString(),
+          };
+        }
+        this.session.responses.push(response);
+        this._flushLog();
+        return response;
+      }),
+    );
+  }
+
+  private async _runAgent(
+    agent: AgentPersona,
+    round: number,
+    task: string,
+    config: EnsembleConfig,
+    projectDir: string,
+    planContent: string | null,
+    gitLog: string,
+    injected: string[],
+    timeoutMs: number,
+    maxTurns: number,
+  ): Promise<AgentResponse> {
+    const safeName = validateAgentName(agent.name);
+    const worktreeDir = path.join(projectDir, WORKTREE_DIR, safeName);
+    const branchName = `ensemble/${safeName}`;
+    const permissionMode =
+      agent.permissionMode ?? config.defaultPermissionMode ?? 'bypassPermissions';
+
+    const otherBranches = config.agents
+      .filter((a) => a.name !== agent.name)
+      .map((a) => `ensemble/${a.name}`)
+      .join(', ');
+
+    // Use literalReplace so values containing $ don't trigger regex escapes
+    const rawPrompt = loadSystemPrompt();
+    const systemPrompt = [
+      ['{{emoji}}', agent.emoji],
+      ['{{name}}', agent.name],
+      ['{{persona}}', agent.persona],
+      ['{{workDir}}', worktreeDir],
+      ['{{otherBranches}}', otherBranches],
+    ].reduce(
+      (tmpl, [token, value]) => literalReplace(tmpl, token, value),
+      rawPrompt,
+    );
+
+    const prompt = buildRoundPrompt(
+      round, task, planContent, gitLog, injected, agent, branchName,
+    );
+
+    let session = this._agentSessions.get(agent.name);
+    if (!session || !session.isReady) {
+      if (session) session.stop();
+      this.log(`[ensemble:${this.id}] starting agent session ${agent.name} round ${round}`);
+      session = new PersistentClaudeSession(
+        {
+          name: `ensemble-${this.id}-${agent.name}`,
+          cwd: worktreeDir,
+          model: agent.model ?? config.agents[0].model,
+          permissionMode,
+          maxTurns,
+          appendSystemPrompt: systemPrompt,
+        },
+        this.claudeBin,
+      );
+      await session.start();
+      this._agentSessions.set(agent.name, session);
+      const pid = session.pid;
+      if (pid !== undefined) {
+        this.session.agentPids ??= {};
+        this.session.agentPids[agent.name] = pid;
+      }
+    }
+
+    const result = await session.send(prompt, { timeout: timeoutMs });
+    const consensus = parseConsensus(result.output) ?? false;
+
+    return {
+      agent: agent.name,
+      round,
+      content: result.output,
+      consensus,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // ─── Worktree management ───────────────────────────────────────────────────
+
+  private async _setupWorktrees(
+    projectDir: string,
+    agents: AgentPersona[],
+  ): Promise<void> {
+    try { await git(['worktree', 'prune'], projectDir); } catch { /* ok */ }
+
+    const { stdout: worktreeOut } = await git(
+      ['worktree', 'list', '--porcelain'], projectDir,
+    );
+    const existingWorktrees = new Set(
+      worktreeOut
+        .split('\n')
+        .filter((l) => l.startsWith('worktree '))
+        .map((l) => l.slice('worktree '.length)),
+    );
+
+    for (const agent of agents) {
+      const safeName = validateAgentName(agent.name);
+      const branchName = `ensemble/${safeName}`;
+      const worktreePath = path.join(projectDir, WORKTREE_DIR, safeName);
+
+      if (existingWorktrees.has(worktreePath)) continue;
+
+      try {
+        await git(['branch', branchName], projectDir);
+      } catch { /* branch already exists */ }
+
+      if (fs.existsSync(worktreePath)) {
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+      }
+
+      fs.mkdirSync(path.join(projectDir, WORKTREE_DIR), { recursive: true });
+      await git(['worktree', 'add', worktreePath, branchName], projectDir, 60_000);
+    }
+  }
+
+  // ─── Review / Accept / Reject ──────────────────────────────────────────────
+
+  async review(): Promise<EnsembleReviewResult> {
+    const { config, responses, round, status } = this.session;
+    const projectDir = path.resolve(config.projectDir);
+
+    const changedFiles: EnsembleChangedFile[] = [];
+    try {
+      const { stdout } = await git(['diff', '--numstat', 'HEAD~1', 'HEAD'], projectDir);
+      for (const line of stdout.trim().split('\n').filter(Boolean)) {
+        const parts = line.split('\t');
+        if (parts.length < 3) continue;
+        const [ins, del, file] = parts;
+        changedFiles.push({
+          file,
+          insertions: Math.max(0, parseInt(ins, 10) || 0),
+          deletions: Math.max(0, parseInt(del, 10) || 0),
+        });
+      }
+    } catch { /* no history yet */ }
+
+    let branches: string[] = [];
+    try {
+      const { stdout } = await git(['branch', '--list', 'ensemble/*'], projectDir);
+      branches = stdout
+        .trim()
+        .split('\n')
+        .map((b) => b.trim().replace(/^\*\s*/, ''))
+        .filter(Boolean);
+    } catch { /* ok */ }
+
+    let worktrees: string[] = [];
+    try {
+      const worktreeBase = path.join(projectDir, WORKTREE_DIR);
+      if (fs.existsSync(worktreeBase)) {
+        worktrees = fs.readdirSync(worktreeBase).map((d) =>
+          path.join(worktreeBase, d),
+        );
+      }
+    } catch { /* ok */ }
+
+    const planPath = path.join(projectDir, 'plan.md');
+    const planExists = fs.existsSync(planPath);
+    const planContent = planExists ? fs.readFileSync(planPath, 'utf8') : undefined;
+
+    const lastRoundResponses = responses.filter((r) => r.round === round);
+    const agentSummaries = lastRoundResponses.map((r) => ({
+      agent: r.agent,
+      consensus: r.consensus,
+      preview: r.content.slice(0, 500),
+    }));
+
+    return {
+      ensembleId: this.id,
+      projectDir,
+      status,
+      rounds: round,
+      planExists,
+      planContent,
+      changedFiles,
+      branches,
+      worktrees,
+      agentSummaries,
+    };
+  }
+
+  async accept(): Promise<EnsembleAcceptResult> {
+    const projectDir = path.resolve(this.session.config.projectDir);
+
+    const removedWorktrees: string[] = [];
+    const worktreeBase = path.join(projectDir, WORKTREE_DIR);
+    try {
+      for (const name of fs.readdirSync(worktreeBase)) {
+        const wt = path.join(worktreeBase, name);
+        try {
+          await git(['worktree', 'remove', '--force', wt], projectDir, 60_000);
+          removedWorktrees.push(wt);
+        } catch { /* ok — may already be gone */ }
+      }
+      fs.rmSync(worktreeBase, { recursive: true, force: true });
+    } catch { /* ok */ }
+
+    const deletedBranches: string[] = [];
+    try {
+      const { stdout } = await git(['branch', '--list', 'ensemble/*'], projectDir);
+      for (const b of stdout.trim().split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const branch = b.replace(/^\*\s*/, '');
+        try {
+          await git(['branch', '-D', branch], projectDir);
+          deletedBranches.push(branch);
+        } catch { /* ok */ }
+      }
+    } catch { /* ok */ }
+
+    const planPath = path.join(projectDir, 'plan.md');
+    let planDeleted = false;
+    if (fs.existsSync(planPath)) {
+      fs.unlinkSync(planPath);
+      planDeleted = true;
+    }
+    const reviewsPath = path.join(projectDir, 'reviews');
+    if (fs.existsSync(reviewsPath)) {
+      fs.rmSync(reviewsPath, { recursive: true, force: true });
+    }
+
+    this.session.status = 'accepted';
+    this.log(
+      `[ensemble:${this.id}] accepted — removed ${deletedBranches.length} branches, ${removedWorktrees.length} worktrees`,
+    );
+    return {
+      ensembleId: this.id,
+      branchesDeleted: deletedBranches,
+      worktreesRemoved: removedWorktrees,
+      planDeleted,
+    };
+  }
+
+  async reject(feedback: string): Promise<EnsembleRejectResult> {
+    const projectDir = path.resolve(this.session.config.projectDir);
+    const planPath = path.join(projectDir, 'plan.md');
+
+    const content = [
+      '# Plan (Rejected — Needs Rework)',
+      '',
+      `> Feedback: ${feedback}`,
+      '',
+      '## Uncompleted Tasks',
+      '',
+      'The ensemble must address the feedback above and re-complete all tasks.',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(planPath, content, 'utf8');
+    try {
+      await git(['add', 'plan.md'], projectDir);
+      await git(
+        ['commit', '-m', `reject: ensemble ${this.id} — feedback recorded`],
+        projectDir,
+      );
+    } catch { /* ok — repo may not have any commits yet */ }
+
+    this.session.status = 'rejected';
+    this.log(`[ensemble:${this.id}] rejected — feedback recorded`);
+    return { ensembleId: this.id, planRewritten: true, feedback };
+  }
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  private _readPlan(projectDir: string): string | null {
+    const p = path.join(projectDir, 'plan.md');
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
+  }
+
+  private async _getGitLog(projectDir: string): Promise<string> {
+    try {
+      const { stdout } = await git(['log', '--oneline', '-15'], projectDir);
+      return stdout.trim();
+    } catch {
+      return '(no git history)';
+    }
+  }
+
+  private _logPath(): string {
+    const logDir = path.join(stateDir(), 'ensemble-logs');
+    fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+    return path.join(logDir, `ensemble-${this.id}.json`);
+  }
+
+  private _flushLog(): void {
+    try {
+      fs.writeFileSync(
+        this._logPath(),
+        JSON.stringify(this.session, null, 2),
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    } catch (err) {
+      this.log(
+        `[ensemble:${this.id}] log flush failed — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+// ─── Round prompt builder ─────────────────────────────────────────────────────
+
+export function buildRoundPrompt(
+  round: number,
+  task: string,
+  plan: string | null,
+  gitLog: string,
+  injected: string[],
+  agent: AgentPersona,
+  branchName: string,
+): string {
+  const parts: string[] = [];
+
+  parts.push(`# Ensemble Round ${round}`, '');
+  parts.push(`**Task:** ${task}`);
+  parts.push(`**Your branch:** \`${branchName}\``, '');
+
+  if (round === 1) {
+    parts.push(
+      '## Round 1 — Scoring (Planning)', '',
+      'Write `plan.md` in the project root. Define all tasks as `- [ ] description` checkboxes.',
+      'Assign tasks, estimate complexity, describe acceptance criteria.',
+      '**Do NOT write any business code this round.** Plan only.', '',
+      'After writing plan.md, commit it and merge to main.', '',
+    );
+  } else {
+    if (plan) {
+      parts.push('## Current plan.md', '', '```markdown', plan, '```', '');
+    }
+    parts.push(
+      '## Round Instructions', '',
+      '1. `git pull origin main` — sync with other agents',
+      '2. Find an unclaimed `- [ ]` task in plan.md',
+      '3. Claim it (change to `- [x] task (your name)`) and commit plan.md',
+      '4. Implement the task, write/run tests',
+      '5. Commit your work and merge to main',
+      '6. Review other agents\' recent commits in the git log',
+      '7. Vote [CONSENSUS: YES] if ALL tasks are done and passing, [CONSENSUS: NO] otherwise',
+      '',
+    );
+  }
+
+  if (gitLog) {
+    parts.push('## Recent git log (main)', '', '```', gitLog, '```', '');
+  }
+
+  if (injected.length > 0) {
+    parts.push('## Director\'s Cue (from user)', '');
+    for (const msg of injected) parts.push(`> ${msg}`, '');
+  }
+
+  parts.push(
+    '---', '',
+    'End your response with exactly one of: `[CONSENSUS: YES]` or `[CONSENSUS: NO]`',
+  );
+
+  return parts.join('\n');
+}
+
+// ─── Fallback system prompt ───────────────────────────────────────────────────
+
+const DEFAULT_SYSTEM_PROMPT = `# Clawnductor Ensemble Charter
+
+You are **{{emoji}} {{name}}**, an AI coding agent working as part of a multi-agent ensemble orchestrated by Clawnductor.
+
+**Your persona:** {{persona}}
+
+**Your working directory:** \`{{workDir}}\`
+
+**Other agents' branches:** {{otherBranches}}
+
+## Rules
+- §0 Never fabricate output — use tools to verify everything
+- §1 Round 1 = plan.md only, no business code
+- §2 Claim tasks before working on them (edit plan.md, commit)
+- §3 Git state is truth — check it each round
+- §4 Merge to main locally, never push
+- §5 Cross-review other agents' work before voting
+- §6 Auto-resolve all merge conflicts, never block
+- §7 Act, don't ask — no permission-seeking
+- §8 Minimum necessary tool calls
+
+End every response with [CONSENSUS: YES] or [CONSENSUS: NO].
+`;
