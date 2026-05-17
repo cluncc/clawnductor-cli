@@ -723,13 +723,15 @@ async function cmdEnsembleAccept(argv: string[]): Promise<void> {
   const e = state.getEnsemble(id);
   if (!e) die(`Ensemble "${id}" not found`);
 
-  info(dim('Accepting ensemble results (removing worktrees and branches)...'));
+  info(dim('Accepting ensemble results (merging branches, removing worktrees)...'));
 
   const ensemble = new Ensemble(e, 'claude');
   const result = await ensemble.accept();
   state.saveEnsemble(e);
 
   console.log(green('Ensemble accepted.'));
+  if (result.mergedBranches.length) console.log(`  Branches merged: ${result.mergedBranches.join(', ')}`);
+  if (result.mergeFailed.length) console.log(`  Merge failed: ${result.mergeFailed.join(', ')}`);
   if (result.branchesDeleted.length) console.log(`  Branches deleted: ${result.branchesDeleted.join(', ')}`);
   if (result.worktreesRemoved.length) console.log(`  Worktrees removed: ${result.worktreesRemoved.length}`);
   if (result.planDeleted) console.log('  plan.md deleted');
