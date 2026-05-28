@@ -74,7 +74,6 @@ export class PersistentClaudeSession extends EventEmitter {
 
   private proc: ChildProcessWithoutNullStreams | null = null;
   private _isReady = false;
-  private _isPaused = false;
   private _isBusy = false;
 
   private _resolve: ((r: SendResult) => void) | null = null;
@@ -107,7 +106,6 @@ export class PersistentClaudeSession extends EventEmitter {
 
   get pid(): number | undefined { return this.proc?.pid; }
   get isReady(): boolean { return this._isReady; }
-  get isPaused(): boolean { return this._isPaused; }
   get isBusy(): boolean { return this._isBusy; }
 
   getStats(): SessionStats {
@@ -131,12 +129,6 @@ export class PersistentClaudeSession extends EventEmitter {
       lastOutput: this._lastOutput ?? undefined,
       lastError: this._lastError ?? undefined,
     };
-  }
-
-  getHistory(
-    limit = 50,
-  ): Array<{ time: string; type: string; event: StreamEvent }> {
-    return this._stats.history.slice(-limit);
   }
 
   // ─── Start ─────────────────────────────────────────────────────────────────
@@ -304,7 +296,6 @@ export class PersistentClaudeSession extends EventEmitter {
   ): Promise<SendResult> {
     if (!this._isReady) throw new Error('Session not ready');
     if (this._isBusy) throw new Error('Session is busy');
-    if (this._isPaused) throw new Error('Session is paused');
     if (!this.proc) throw new Error('No subprocess');
 
     this._isBusy = true;
@@ -375,9 +366,6 @@ export class PersistentClaudeSession extends EventEmitter {
     this._isReady = false;
     this._isBusy = false;
   }
-
-  pause(): void { this._isPaused = true; }
-  resume(): void { this._isPaused = false; }
 
   private _clearTurn(): void {
     if (this._turnTimer) {

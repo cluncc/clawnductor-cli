@@ -1,7 +1,7 @@
 export type PermissionMode = 'bypassPermissions' | 'acceptEdits' | 'auto' | 'plan';
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
-export const MODEL_ALIASES: Record<string, string> = {
+const MODEL_ALIASES: Record<string, string> = {
   opus: 'claude-opus-4-7',
   sonnet: 'claude-sonnet-4-6',
   haiku: 'claude-haiku-4-5-20251001',
@@ -202,14 +202,6 @@ export interface UltrareviewResult {
   startTime: string;
   endTime?: string;
   error?: string;
-}
-
-// ─── AgentInfo ────────────────────────────────────────────────────────────────
-
-export interface AgentInfo {
-  name: string;
-  file: string;
-  description: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────

@@ -21,7 +21,6 @@ import { Ensemble } from './ensemble.js';
 import * as state from './state.js';
 import {
   validateName,
-  validateAgentName,
   validateCwd,
   validateRegex,
   validatePermissionMode,

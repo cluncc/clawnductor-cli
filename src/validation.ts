@@ -7,14 +7,11 @@ export const MAX_AGENT_NAME_LENGTH = 50;
 export const MAX_CWD_LENGTH = 500;
 export const MAX_REGEX_LENGTH = 500;
 export const MAX_STRING_FIELD_LENGTH = 50_000;
-export const MAX_TIMEOUT_MS = 24 * 60 * 60_000; // 24 h
-export const MIN_TIMEOUT_MS = 1_000;             // 1 s
 
 // ─── Patterns ─────────────────────────────────────────────────────────────────
 
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
 const AGENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Tool names: alphanumeric + underscore/colon/hyphen, optional trailing wildcard.
 // Covers: Bash, Read, mcp__server__tool, bash:run, mcp__*
 const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_:*-]*$|^\*$/;
@@ -42,7 +39,7 @@ const FORBIDDEN_PATH_PREFIXES: string[] =
     ? [] // Windows doesn't have /proc, /sys etc.
     : ['/proc', '/sys', '/dev', '/run/user'];
 
-// ─── Name / ID validators ─────────────────────────────────────────────────────
+// ─── Name validators ──────────────────────────────────────────────────────────
 
 export function validateName(value: unknown, field = 'name'): string {
   if (typeof value !== 'string') throw new Error(`${field} must be a string`);
@@ -68,14 +65,6 @@ export function validateAgentName(value: unknown, field = 'agent name'): string 
       `${field} must match [A-Za-z0-9][A-Za-z0-9-]* (safe for git branch names)`,
     );
   return v;
-}
-
-/** Validate a UUID (v4 or any version) used as an opaque record identifier. */
-export function validateId(value: unknown, field = 'id'): string {
-  if (typeof value !== 'string') throw new Error(`${field} must be a string`);
-  if (!UUID_RE.test(value.trim()))
-    throw new Error(`${field} must be a valid UUID`);
-  return value.trim();
 }
 
 // ─── Path validator ───────────────────────────────────────────────────────────
@@ -156,30 +145,6 @@ export function validateEffort(value: unknown, field = 'effort'): string {
     throw new Error(
       `${field} must be one of: ${[...VALID_EFFORT_LEVELS].join(', ')}`,
     );
-  return value;
-}
-
-// ─── Numeric validators ───────────────────────────────────────────────────────
-
-export function validateTimeout(value: unknown, field = 'timeout'): number {
-  if (typeof value !== 'number' || !Number.isFinite(value))
-    throw new Error(`${field} must be a finite number`);
-  if (value < MIN_TIMEOUT_MS)
-    throw new Error(`${field} must be ≥${MIN_TIMEOUT_MS}ms`);
-  if (value > MAX_TIMEOUT_MS)
-    throw new Error(`${field} must be ≤${MAX_TIMEOUT_MS}ms`);
-  return value;
-}
-
-export function validatePositiveInt(
-  value: unknown,
-  field: string,
-  max?: number,
-): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1)
-    throw new Error(`${field} must be a positive integer`);
-  if (max !== undefined && value > max)
-    throw new Error(`${field} must be ≤${max}`);
   return value;
 }
 

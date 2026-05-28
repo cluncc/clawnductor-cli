@@ -3,13 +3,10 @@ import assert from 'node:assert/strict';
 import {
   validateName,
   validateAgentName,
-  validateId,
   validateCwd,
   validateRegex,
   validatePermissionMode,
   validateEffort,
-  validateTimeout,
-  validatePositiveInt,
   validateStringField,
   validateToolName,
   validateModel,
@@ -18,8 +15,6 @@ import {
   MAX_CWD_LENGTH,
   MAX_REGEX_LENGTH,
   MAX_STRING_FIELD_LENGTH,
-  MIN_TIMEOUT_MS,
-  MAX_TIMEOUT_MS,
 } from './validation.js';
 
 // ─── validateName ─────────────────────────────────────────────────────────────
@@ -109,36 +104,6 @@ describe('validateAgentName', () => {
 
   it('throws when value is not a string', () => {
     assert.throws(() => validateAgentName(42 as unknown as string), /must be a string/);
-  });
-});
-
-// ─── validateId ───────────────────────────────────────────────────────────────
-
-describe('validateId', () => {
-  it('accepts valid UUID v4', () => {
-    const uuid = '550e8400-e29b-41d4-a716-446655440000';
-    assert.equal(validateId(uuid), uuid);
-  });
-
-  it('accepts UUID with uppercase hex', () => {
-    const uuid = '550E8400-E29B-41D4-A716-446655440000';
-    assert.equal(validateId(uuid), uuid);
-  });
-
-  it('throws on invalid UUID format', () => {
-    assert.throws(() => validateId('not-a-uuid'), /must be a valid UUID/);
-  });
-
-  it('throws on empty string', () => {
-    assert.throws(() => validateId(''), /must be a valid UUID/);
-  });
-
-  it('throws on short UUID', () => {
-    assert.throws(() => validateId('550e8400-e29b-41d4'), /must be a valid UUID/);
-  });
-
-  it('throws when value is not a string', () => {
-    assert.throws(() => validateId(123 as unknown as string), /must be a string/);
   });
 });
 
@@ -304,75 +269,6 @@ describe('validateEffort', () => {
 
   it('throws when value is not a string', () => {
     assert.throws(() => validateEffort(42 as unknown as string), /must be a string/);
-  });
-});
-
-// ─── validateTimeout ──────────────────────────────────────────────────────────
-
-describe('validateTimeout', () => {
-  it('accepts value within range', () => {
-    assert.equal(validateTimeout(5_000), 5_000);
-  });
-
-  it('accepts MIN_TIMEOUT_MS exactly', () => {
-    assert.equal(validateTimeout(MIN_TIMEOUT_MS), MIN_TIMEOUT_MS);
-  });
-
-  it('accepts MAX_TIMEOUT_MS exactly', () => {
-    assert.equal(validateTimeout(MAX_TIMEOUT_MS), MAX_TIMEOUT_MS);
-  });
-
-  it('throws when below MIN_TIMEOUT_MS', () => {
-    assert.throws(() => validateTimeout(MIN_TIMEOUT_MS - 1), /must be ≥/);
-  });
-
-  it('throws when above MAX_TIMEOUT_MS', () => {
-    assert.throws(() => validateTimeout(MAX_TIMEOUT_MS + 1), /must be ≤/);
-  });
-
-  it('throws for NaN', () => {
-    assert.throws(() => validateTimeout(NaN), /must be a finite number/);
-  });
-
-  it('throws for Infinity', () => {
-    assert.throws(() => validateTimeout(Infinity), /must be a finite number/);
-  });
-
-  it('throws when value is not a number', () => {
-    assert.throws(() => validateTimeout('5000' as unknown as number), /must be a finite number/);
-  });
-});
-
-// ─── validatePositiveInt ──────────────────────────────────────────────────────
-
-describe('validatePositiveInt', () => {
-  it('accepts positive integers', () => {
-    assert.equal(validatePositiveInt(1, 'count'), 1);
-    assert.equal(validatePositiveInt(100, 'count'), 100);
-  });
-
-  it('throws for 0', () => {
-    assert.throws(() => validatePositiveInt(0, 'count'), /must be a positive integer/);
-  });
-
-  it('throws for negative integers', () => {
-    assert.throws(() => validatePositiveInt(-1, 'count'), /must be a positive integer/);
-  });
-
-  it('throws for floats', () => {
-    assert.throws(() => validatePositiveInt(1.5, 'count'), /must be a positive integer/);
-  });
-
-  it('throws when exceeding max', () => {
-    assert.throws(() => validatePositiveInt(11, 'count', 10), /must be ≤/);
-  });
-
-  it('accepts value equal to max', () => {
-    assert.equal(validatePositiveInt(10, 'count', 10), 10);
-  });
-
-  it('throws when value is not a number', () => {
-    assert.throws(() => validatePositiveInt('5' as unknown as number, 'count'), /must be a positive integer/);
   });
 });
 
