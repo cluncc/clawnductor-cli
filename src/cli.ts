@@ -53,27 +53,25 @@ const VERSION = '1.0.0';
 
 // ─── Terminal output helpers ──────────────────────────────────────────────────
 
-const isTTY = process.stdout.isTTY;
+const isOutTTY = process.stdout.isTTY;
 const isErrTTY = process.stderr.isTTY;
 
-function clr(code: string, text: string): string {
-  return isTTY ? `\x1b[${code}m${text}\x1b[0m` : text;
-}
-function clrErr(code: string, text: string): string {
-  return isErrTTY ? `\x1b[${code}m${text}\x1b[0m` : text;
+// Wraps text in an ANSI SGR sequence when the destination stream is a TTY.
+function ansi(code: string, text: string, tty: boolean): string {
+  return tty ? `\x1b[${code}m${text}\x1b[0m` : text;
 }
 
-const bold = (t: string) => clr('1', t);
-const dim = (t: string) => clr('2', t);
-const green = (t: string) => clr('32', t);
-const red = (t: string) => clr('31', t);
-const yellow = (t: string) => clr('33', t);
-const cyan = (t: string) => clr('36', t);
+const bold = (t: string) => ansi('1', t, isOutTTY);
+const dim = (t: string) => ansi('2', t, isOutTTY);
+const green = (t: string) => ansi('32', t, isOutTTY);
+const red = (t: string) => ansi('31', t, isOutTTY);
+const yellow = (t: string) => ansi('33', t, isOutTTY);
+const cyan = (t: string) => ansi('36', t, isOutTTY);
 
-function log(msg: string): void { process.stderr.write(clrErr('2', msg) + '\n'); }
+function log(msg: string): void { process.stderr.write(ansi('2', msg, isErrTTY) + '\n'); }
 function info(msg: string): void { process.stderr.write(msg + '\n'); }
 function die(msg: string): never {
-  process.stderr.write(clrErr('31', `Error: ${msg}`) + '\n');
+  process.stderr.write(ansi('31', `Error: ${msg}`, isErrTTY) + '\n');
   process.exit(1);
 }
 
