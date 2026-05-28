@@ -124,6 +124,14 @@ export function validateRegex(value: unknown, field = 'pattern'): string {
       `${field} contains a quantified alternation group that could cause catastrophic backtracking`,
     );
   }
+  // Optional-token inside a repeated group — (a?){n}, (a?)+, (a?)*
+  // The previous nested-quantifier check only flagged groups containing
+  // + or *; (a?){50} against "aaaa...aaab" is still exponential.
+  if (/\([^)]*\?[^)]*\)\s*[+*{]/.test(value)) {
+    throw new Error(
+      `${field} contains an optional token inside a repeated group that could cause catastrophic backtracking`,
+    );
+  }
 
   return value;
 }

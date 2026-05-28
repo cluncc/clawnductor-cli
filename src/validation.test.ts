@@ -238,6 +238,11 @@ describe('validateRegex', () => {
     assert.throws(() => validateRegex('(a|ab)*'), /catastrophic backtracking/);
   });
 
+  it('throws on optional inside repeated group ((a?){50})', () => {
+    assert.throws(() => validateRegex('(a?){50}'), /catastrophic backtracking/);
+    assert.throws(() => validateRegex('(a?)+'), /catastrophic backtracking/);
+  });
+
   it('throws when regex exceeds max length', () => {
     assert.throws(
       () => validateRegex('a'.repeat(MAX_REGEX_LENGTH + 1)),
