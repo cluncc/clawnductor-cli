@@ -637,6 +637,26 @@ function cmdEnsembleAbort(argv: string[]): void {
   const pid = e._cliPid;
   if (!pid) die('No CLI PID recorded for this ensemble — send SIGINT to the terminal running it');
 
+  // Guard against state-file tampering and stale-PID reuse. process.kill with
+  // pid <= 1 has special meaning (0 = current process group, -1 = every
+  // permitted process) and could nuke unrelated processes; pid === process.pid
+  // would signal ourselves. Probe with signal 0 first to confirm the PID is
+  // alive before sending a real signal — if the OS reused the slot for an
+  // unrelated process, we still misfire, but at least we don't blast signals
+  // at impossible PIDs.
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    die(`Refusing to abort: stored CLI PID ${pid} is invalid`);
+  }
+  try {
+    process.kill(pid, 0);
+  } catch {
+    e.status = 'abandoned';
+    e.endTime = new Date().toISOString();
+    state.saveEnsemble(e);
+    console.log(yellow('Process already gone — marked as abandoned'));
+    return;
+  }
+
   try {
     process.kill(pid, 'SIGINT');
     console.log(green(`Abort signal sent to process ${pid}`));
