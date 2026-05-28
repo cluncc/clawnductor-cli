@@ -147,10 +147,9 @@ describe('optInt', () => {
     assert.throws(() => optInt(opt, 'count'), /must be an integer/);
   });
 
-  it('returns truncated integer for float string (parseInt behavior)', () => {
-    // parseInt('3.14', 10) === 3 which IS an integer, so no throw
+  it('throws for float string', () => {
     const opt: Record<string, string | boolean> = { count: '3.14' };
-    assert.equal(optInt(opt, 'count'), 3);
+    assert.throws(() => optInt(opt, 'count'), /must be an integer/);
   });
 
   it('returns undefined when value is boolean true (not a string)', () => {

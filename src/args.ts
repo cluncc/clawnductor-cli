@@ -79,7 +79,7 @@ export function optInt(
 ): number | undefined {
   const v = optStr(opt, key);
   if (v === undefined) return defaultVal;
+  if (!/^-?\d+$/.test(v.trim())) throw new Error(`--${key} must be an integer, got: ${v}`);
   const n = parseInt(v, 10);
-  if (!Number.isInteger(n)) throw new Error(`--${key} must be an integer, got: ${v}`);
   return n;
 }
