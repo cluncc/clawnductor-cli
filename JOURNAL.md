@@ -360,3 +360,59 @@ Note: Tests do NOT require the `claude` binary — they test pure logic and file
   - `SessionConfig.bare` — was set but never acted on in `buildArgs()`
   - `SessionConfig.noSessionPersistence` — never set or read anywhere
 - 208 unit tests added covering all validation functions, argument parsing, state I/O, ensemble utilities, and session arg building
+
+---
+
+## 2026-05-28 — cleanup pass
+
+Dead-code sweep across `src/`. No behavior change, no public CLI surface
+touched, no dependencies modified.
+
+### Removed (provably dead via whole-repo grep)
+- `validation.ts` — `validateId`, `validateTimeout`, `validatePositiveInt`,
+  `MIN_TIMEOUT_MS`, `MAX_TIMEOUT_MS`, and the `UUID_RE` constant they relied
+  on. Only references were the tests covering them; `state.ts` has its own
+  internal `assertSafeId` UUID guard so `validateId` had no production caller.
+- `types.ts` — `AgentInfo` interface (no readers, no writers).
+- `types.ts` — demoted `MODEL_ALIASES` from `export` to module-private. Only
+  consumer is `resolveModelAlias` in the same file.
+- `cli.ts` — unused `validateAgentName` import.
+- `session.ts` — `pause()`, `resume()`, `isPaused` getter, the `_isPaused`
+  field, and the corresponding "Session is paused" guard in `send()`. The
+  pause/resume API existed only as scaffolding — never invoked from
+  `cli.ts`, `ensemble.ts`, or any other caller.
+- `session.ts` — `getHistory()`. Method had no callers; `_stats.history`
+  is still written to so the bounded-ring buffer keeps emitting events,
+  but no one reads it back.
+- `validation.test.ts` — 21 tests covering the removed validators
+  (validateId / validateTimeout / validatePositiveInt). Test count went
+  from 209 → 188; all remaining tests pass.
+
+### Refactor (single, scoped)
+- `cli.ts` — collapsed near-duplicate `clr` and `clrErr` color helpers
+  into a single `ansi(code, text, tty)` function. Each color shortcut
+  (`bold`, `dim`, `green`, `red`, `yellow`, `cyan`) now passes the
+  appropriate TTY flag (`isOutTTY` or `isErrTTY`) directly. Net effect:
+  one helper instead of two, identical output, identical TTY behavior.
+
+### Verified
+- `npx tsc --noEmit` — clean
+- `npx tsc -p tsconfig.test.json --noEmit` — clean
+- `npm run build` — clean
+- `npm test` — 188/188 pass (down from 209 after pruning tests for
+  removed validators)
+
+### Net diff
+`src/` went from 4,560 lines to 4,398 lines (-162). No imports broke;
+no `package.json` deps were touched; `package-lock.json` untouched.
+
+### Left alone (deliberate)
+- `SessionConfig.forkSession` — has dedicated `buildArgs` tests and is
+  part of the session-config contract; absence of a CLI flag setting it
+  doesn't make it dead.
+- `EnsembleSession.agentPids` — written but not read in code; persisted
+  to state for forensic debugging.
+- `SessionStats.lastOutput` / `lastError` / `lastRetryError` — returned
+  by `getStats()` and serialized via `--json` outputs.
+- `setStateDir` — used by the test suite to redirect state to a temp
+  directory.
